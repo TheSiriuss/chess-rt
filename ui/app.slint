@@ -1,0 +1,550 @@
+import { Button, CheckBox, Slider, ComboBox, ListView } from "std-widgets.slint";
+
+export global Theme {
+    in-out property <bool> night: false;
+    out property <color> accent: night ? #8fb0e6 : #c9a46a;
+    out property <color> accent-light: night ? #d6e4ff : #f3dcb0;
+    out property <color> label: night ? #9db6e0b0 : #d9b77acc;
+    out property <color> panel-top: night ? #0d1118f4 : #121317f4;
+    out property <color> panel-bottom: night ? #090b10f4 : #0d0e11f4;
+}
+
+export struct EngineRow {
+    id: string,
+    name: string,
+    about: string,
+    status: string,
+    progress: float,   // < 0: no progress bar
+    installed: bool,
+    busy: bool,
+}
+
+export struct MoveRow {
+    num: int,
+    white: string,
+    black: string,
+    white-cur: bool,
+    black-cur: bool,
+}
+
+component Section inherits Text {
+    color: Theme.accent;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    callback clicked;
+    height: 30px;
+    border-radius: 8px;
+    background: active ? Theme.accent.with-alpha(0.25) : (ta.has-hover ? #ffffff14 : #ffffff08);
+    border-width: 1px;
+    border-color: active ? Theme.accent.with-alpha(0.63) : #ffffff18;
+    Text {
+        text: root.text;
+        color: active ? Theme.accent-light : #d0ccc4;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component PromoButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> label;
+    callback clicked;
+    width: 92px;
+    height: 104px;
+    border-radius: 12px;
+    background: ta.has-hover ? Theme.accent.with-alpha(0.31) : #ffffff10;
+    border-width: 1px;
+    border-color: Theme.accent.with-alpha(0.56);
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+        Text { text: glyph; font-size: 44px; color: #f6ead2; horizontal-alignment: center; }
+        Text { text: label; font-size: 12px; color: #d8c8a8; horizontal-alignment: center; }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component App inherits Window {
+    title: "Шахматы RT";
+    preferred-width: 1380px;
+    preferred-height: 900px;
+    min-width: 960px;
+    min-height: 660px;
+    background: #08090b;
+    forward-focus: keys;
+
+    // ---- layout of the board (logical px), read by Rust for rendering
+    property <length> panel-w: 350px;
+    out property <length> area-w: root.width - (root.panel-open ? panel-w : 14px);
+    out property <length> bsize: min(area-w, root.height) / 1.36;
+    out property <length> bx: (area-w - bsize) / 2;
+    out property <length> by: (root.height - bsize) / 2;
+
+    // ---- state from Rust
+    in property <string> status: "Ход белых";
+    in property <string> substatus: "";
+    in property <bool> white-to-move: true;
+    in property <bool> thinking;
+    in property <[MoveRow]> moves;
+    in property <int> move-count;
+    in property <[string]> file-labels: ["a", "b", "c", "d", "e", "f", "g", "h"];
+    in property <[string]> rank-labels: ["8", "7", "6", "5", "4", "3", "2", "1"];
+    in property <bool> promo-visible;
+    in property <bool> promo-white: true;
+    in property <string> game-over: "";
+    in property <string> fps-text: "";
+    in property <string> gpu-text: "";
+    in property <string> eval-text: "";
+    in property <bool> board-hover-piece;
+
+    // ---- settings (read by Rust)
+    in-out property <int> mode: 0;      // 0 vs AI (white), 1 vs AI (black), 2 two players, 3 AI vs AI
+    in-out property <int> level: 12;
+    in-out property <int> opponent: 0;           // 0 = built-in, then installed engines
+    in property <[string]> opponent-names: ["Встроенный ИИ"];
+    in property <string> level-text: "";
+    in property <[EngineRow]> engine-rows;
+    in-out property <bool> engines-open: false;
+    in-out property <bool> graphics-open: false;
+    in-out property <float> music-volume: 0.55;
+    in-out property <float> sfx-volume: 0.8;
+    in-out property <bool> opt-shadows: true;
+    in-out property <float> opt-softness: 0.45;
+    in-out property <bool> opt-ao: true;
+    in-out property <bool> opt-bloom: true;
+    in-out property <bool> opt-spec: true;
+    in-out property <int> opt-quality: 0;  // 0 = 100%, 1 = 75%, 2 = 50%
+    in-out property <bool> opt-rain: false;
+    in-out property <bool> opt-daycycle: false;
+    in-out property <float> opt-daylen: 10;      // minutes per day
+    in property <string> clock-text: "";
+    in-out property <bool> panel-open: true;
+
+    // keep the latest move in view
+    changed move-count => {
+        lv.content-y = min(0px, lv.visible-height - root.moves.length * 24px);
+    }
+
+    callback new-game();
+    callback undo();
+    callback flip();
+    callback promote(int);   // 5 Q, 4 R, 3 B, 2 N
+    callback pointer(int, length, length, int); // kind 0 down / 1 up / 2 move / 3 leave, x, y, button 0 left 1 right
+    callback settings-changed();
+    callback mode-changed();
+    callback engine-action(string);   // download / cancel / delete depending on the row state
+    callback engines-shown();
+    callback volume-changed();
+
+    keys := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "f" || e.text == "а") { root.flip(); return accept; }
+            if (e.text == "n" || e.text == "т") { root.new-game(); return accept; }
+            if (e.text == "u" || e.text == "г" || (e.modifiers.control && (e.text == "z" || e.text == "я"))) { root.undo(); return accept; }
+            if (e.text == "r" || e.text == "к") { root.opt-rain = !root.opt-rain; root.settings-changed(); return accept; }
+            if (e.text == "m" || e.text == "ь") { Theme.night = !Theme.night; root.settings-changed(); return accept; }
+            if (e.text == Key.Tab) { root.panel-open = !root.panel-open; return accept; }
+            reject
+        }
+
+        // ---- board interaction (whole area left of the panel)
+        board-ta := TouchArea {
+            x: 0;
+            y: 0;
+            width: root.area-w;
+            height: root.height;
+            mouse-cursor: root.board-hover-piece ? MouseCursor.pointer : MouseCursor.default;
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) {
+                    keys.focus();
+                    root.pointer(0, self.mouse-x, self.mouse-y, e.button == PointerEventButton.right ? 1 : 0);
+                } else if (e.kind == PointerEventKind.up) {
+                    root.pointer(1, self.mouse-x, self.mouse-y, e.button == PointerEventButton.right ? 1 : 0);
+                }
+            }
+            changed mouse-x => { root.pointer(2, self.mouse-x, self.mouse-y, 0); }
+            changed mouse-y => { root.pointer(2, self.mouse-x, self.mouse-y, 0); }
+            changed has-hover => { if (!self.has-hover) { root.pointer(3, 0, 0, 0); } }
+        }
+
+        // ---- coordinates on the frame
+        for f[i] in root.file-labels: Text {
+            x: root.bx + root.bsize / 8 * (i + 0.5) - 10px;
+            y: root.by + root.bsize + root.bsize / 8 * 0.20;
+            width: 20px;
+            text: f;
+            color: Theme.label;
+            font-size: max(11px, root.bsize / 60);
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+        for r[i] in root.rank-labels: Text {
+            x: root.bx - root.bsize / 8 * 0.42 - 10px;
+            y: root.by + root.bsize / 8 * (i + 0.5) - 8px;
+            width: 20px;
+            text: r;
+            color: Theme.label;
+            font-size: max(11px, root.bsize / 60);
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+
+        // ---- game over banner
+        if root.game-over != "": Rectangle {
+            x: root.bx + root.bsize * 0.12;
+            y: root.by + root.bsize * 0.40;
+            width: root.bsize * 0.76;
+            height: root.bsize * 0.20;
+            border-radius: 16px;
+            background: #0c0d10e0;
+            border-width: 1px;
+            border-color: Theme.accent;
+            drop-shadow-blur: 30px;
+            drop-shadow-color: #000000c0;
+            VerticalLayout {
+                alignment: center;
+                spacing: 10px;
+                Text {
+                    text: root.game-over;
+                    color: Theme.accent-light;
+                    font-size: 26px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Button { text: "Новая партия"; clicked => { root.new-game(); } }
+                }
+            }
+        }
+
+        // ---- promotion dialog
+        if root.promo-visible: Rectangle {
+            background: #00000090;
+            TouchArea { clicked => { root.promote(0); } }
+            Rectangle {
+                width: 460px;
+                height: 190px;
+                border-radius: 18px;
+                background: #121318f0;
+                border-width: 1px;
+                border-color: Theme.accent;
+                drop-shadow-blur: 40px;
+                drop-shadow-color: #000000;
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 14px;
+                    Text { text: "Превращение пешки"; color: Theme.accent-light; font-size: 16px; font-weight: 700; horizontal-alignment: center; }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 12px;
+                        PromoButton { glyph: root.promo-white ? "♕" : "♛"; label: "Ферзь"; clicked => { root.promote(5); } }
+                        PromoButton { glyph: root.promo-white ? "♖" : "♜"; label: "Ладья"; clicked => { root.promote(4); } }
+                        PromoButton { glyph: root.promo-white ? "♗" : "♝"; label: "Слон"; clicked => { root.promote(3); } }
+                        PromoButton { glyph: root.promo-white ? "♘" : "♞"; label: "Конь"; clicked => { root.promote(2); } }
+                    }
+                }
+            }
+        }
+
+        // ---- graphics settings dialog
+        if root.graphics-open: Rectangle {
+            background: #00000080;
+            TouchArea { clicked => { root.graphics-open = false; } }
+            Rectangle {
+                width: 400px;
+                height: 380px;
+                border-radius: 16px;
+                background: #121318f4;
+                border-width: 1px;
+                border-color: Theme.accent;
+                TouchArea { }
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    Text { text: "Графика"; color: Theme.accent-light; font-size: 17px; font-weight: 700; }
+                    GridLayout {
+                        spacing: 4px;
+                        Row {
+                            CheckBox { text: "Тени (трассировка)"; checked <=> root.opt-shadows; toggled => { root.settings-changed(); } }
+                            CheckBox { text: "AO"; checked <=> root.opt-ao; toggled => { root.settings-changed(); } }
+                        }
+                        Row {
+                            CheckBox { text: "Bloom"; checked <=> root.opt-bloom; toggled => { root.settings-changed(); } }
+                            CheckBox { text: "Блики"; checked <=> root.opt-spec; toggled => { root.settings-changed(); } }
+                        }
+                    }
+                    CheckBox { text: "Смена дня и ночи (рассвет, закат, луна)"; checked <=> root.opt-daycycle; toggled => { root.settings-changed(); } }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Длина суток"; color: #a59f93; font-size: 12px; vertical-alignment: center; }
+                        Slider { enabled: root.opt-daycycle; minimum: 2; maximum: 30; value <=> root.opt-daylen; released => { root.settings-changed(); } }
+                        Text { width: 48px; text: round(root.opt-daylen) + " мин"; color: Theme.accent-light; font-size: 12px; vertical-alignment: center; }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Мягкость теней"; color: #a59f93; font-size: 12px; vertical-alignment: center; }
+                        Slider { minimum: 0; maximum: 1; value <=> root.opt-softness; changed => { root.settings-changed(); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text { text: "Разрешение:"; color: #a59f93; font-size: 12px; vertical-alignment: center; }
+                        Chip { text: "100%"; active: root.opt-quality == 0; clicked => { root.opt-quality = 0; root.settings-changed(); } }
+                        Chip { text: "75%"; active: root.opt-quality == 1; clicked => { root.opt-quality = 1; root.settings-changed(); } }
+                        Chip { text: "50%"; active: root.opt-quality == 2; clicked => { root.opt-quality = 2; root.settings-changed(); } }
+                    }
+                    Text { text: root.fps-text; color: #6c675e; font-size: 10px; }
+                    HorizontalLayout {
+                        alignment: end;
+                        Button { text: "Готово"; clicked => { root.graphics-open = false; } }
+                    }
+                }
+            }
+        }
+
+        // ---- engines dialog
+        if root.engines-open: Rectangle {
+            background: #00000080;
+            TouchArea { clicked => { root.engines-open = false; } }
+            Rectangle {
+                width: min(620px, root.width - 40px);
+                height: min(600px, root.height - 40px);
+                border-radius: 16px;
+                background: #121318f6;
+                border-width: 1px;
+                border-color: Theme.accent;
+                TouchArea { }
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    Text { text: "Шахматные движки"; color: Theme.accent-light; font-size: 18px; font-weight: 700; }
+                    Text {
+                        text: "Скачиваются с GitHub (последняя версия, сборка для Linux x86-64) в ~/.local/share/chess-rt/engines. После установки движок появится в списке соперников; сила настраивается тем же ползунком.";
+                        color: #a59f93;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        for row in root.engine-rows: Rectangle {
+                            height: 76px;
+                            HorizontalLayout {
+                                padding: 8px;
+                                spacing: 12px;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 3px;
+                                    Text { text: row.name; color: #f0eadf; font-size: 15px; font-weight: 700; }
+                                    Text { text: row.about; color: #a59f93; font-size: 11px; wrap: word-wrap; }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: row.status; color: row.installed ? #8fd18f : Theme.accent-light; font-size: 11px; }
+                                        if row.progress >= 0: Rectangle {
+                                            height: 6px;
+                                            y: 5px;
+                                            horizontal-stretch: 1;
+                                            border-radius: 3px;
+                                            background: #ffffff14;
+                                            Rectangle {
+                                                x: 0;
+                                                width: parent.width * clamp(row.progress, 0, 1);
+                                                border-radius: 3px;
+                                                background: Theme.accent;
+                                            }
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Button {
+                                        width: 110px;
+                                        text: row.busy ? "Отмена" : row.installed ? "Удалить" : "Скачать";
+                                        clicked => { root.engine-action(row.id); }
+                                    }
+                                }
+                            }
+                            Rectangle { y: parent.height - 1px; height: 1px; background: #ffffff10; }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        Button { text: "Закрыть"; clicked => { root.engines-open = false; } }
+                    }
+                }
+            }
+        }
+
+        // ---- side panel
+        panel := Rectangle {
+            x: root.width - root.panel-w + (root.panel-open ? 0px : root.panel-w - 14px);
+            y: 0;
+            width: root.panel-w;
+            height: root.height;
+            background: @linear-gradient(180deg, Theme.panel-top 0%, Theme.panel-bottom 100%);
+            border-width: 1px;
+            border-color: #ffffff12;
+            animate x { duration: 220ms; easing: ease-out; }
+
+            // collapse handle
+            Rectangle {
+                x: 0;
+                y: root.height / 2 - 30px;
+                width: 14px;
+                height: 60px;
+                background: handle.has-hover ? Theme.accent.with-alpha(0.38) : #ffffff10;
+                border-radius: 4px;
+                Text { text: root.panel-open ? "›" : "‹"; color: Theme.accent-light; horizontal-alignment: center; vertical-alignment: center; }
+                handle := TouchArea { clicked => { root.panel-open = !root.panel-open; } }
+            }
+
+            VerticalLayout {
+                padding: 20px;
+                padding-left: 26px;
+                spacing: 12px;
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: "ШАХМАТЫ"; color: Theme.accent-light; font-size: 24px; font-weight: 800; letter-spacing: 4px; }
+                    Text { text: Theme.night ? "ночной пруд · фонарики · светлячки" : "доска-плот в пруду · трассировка теней"; color: #8d877c; font-size: 11px; }
+                }
+
+                // status card
+                Rectangle {
+                    height: 66px;
+                    border-radius: 12px;
+                    background: #ffffff0a;
+                    border-width: 1px;
+                    border-color: #ffffff14;
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 12px;
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+                            y: (parent.height - 26px) / 2 - 12px;
+                            border-radius: 13px;
+                            background: root.white-to-move ? #efe6d4 : #15151a;
+                            border-width: 2px;
+                            border-color: root.thinking ? #6fd3ff : Theme.accent;
+                            animate border-color { duration: 300ms; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text { text: root.status; color: #f0eadf; font-size: 16px; font-weight: 700; }
+                            Text { text: root.thinking ? "компьютер думает…" : root.substatus; color: root.thinking ? #6fd3ff : #a59f93; font-size: 12px; }
+                        }
+                        Text { text: root.eval-text; color: #8d877c; font-size: 11px; vertical-alignment: center; horizontal-alignment: right; }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button { text: "Новая"; clicked => { root.new-game(); } }
+                    Button { text: "Назад"; clicked => { root.undo(); } }
+                    Button { text: "Повернуть"; clicked => { root.flip(); } }
+                }
+
+                Section { text: "ПАРТИЯ"; }
+                GridLayout {
+                    spacing: 6px;
+                    Row {
+                        Chip { text: "За белых"; active: root.mode == 0; clicked => { root.mode = 0; root.mode-changed(); } }
+                        Chip { text: "За чёрных"; active: root.mode == 1; clicked => { root.mode = 1; root.mode-changed(); } }
+                    }
+                    Row {
+                        Chip { text: "Вдвоём"; active: root.mode == 2; clicked => { root.mode = 2; root.mode-changed(); } }
+                        Chip { text: "Комп vs комп"; active: root.mode == 3; clicked => { root.mode = 3; root.mode-changed(); } }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.opponent-names;
+                        current-index <=> root.opponent;
+                        selected => { root.mode-changed(); }
+                    }
+                    Button { text: "Движки…"; clicked => { root.engines-open = true; root.engines-shown(); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "Сила"; color: #a59f93; font-size: 12px; vertical-alignment: center; }
+                    Slider {
+                        minimum: 1;
+                        maximum: 20;
+                        value: root.level;
+                        changed(v) => { root.level = round(v); }
+                        released => { root.mode-changed(); }
+                    }
+                    Text { width: 22px; text: root.level; color: Theme.accent-light; font-size: 13px; font-weight: 700; vertical-alignment: center; horizontal-alignment: right; }
+                }
+                Text { text: root.level-text; color: #8d877c; font-size: 11px; }
+
+                Section { text: "ХОДЫ"; }
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 80px;
+                    border-radius: 10px;
+                    background: #00000030;
+                    lv := ListView {
+                        for row in root.moves: HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            height: 24px;
+                            spacing: 6px;
+                            Text { width: 34px; text: row.num + "."; color: #7e786d; font-size: 13px; vertical-alignment: center; }
+                            Rectangle {
+                                border-radius: 5px;
+                                background: row.white-cur ? Theme.accent.with-alpha(0.22) : transparent;
+                                Text { x: 6px; text: row.white; color: #ebe4d6; font-size: 13px; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                border-radius: 5px;
+                                background: row.black-cur ? Theme.accent.with-alpha(0.22) : transparent;
+                                Text { x: 6px; text: row.black; color: #ebe4d6; font-size: 13px; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                }
+
+                Section { text: "ПРУД"; }
+                GridLayout {
+                    spacing: 2px;
+                    Row {
+                        CheckBox { text: "Ночь (M)"; checked: Theme.night; toggled => { Theme.night = self.checked; root.settings-changed(); } }
+                        CheckBox { text: "Дождь (R)"; checked <=> root.opt-rain; toggled => { root.settings-changed(); } }
+                    }
+                }
+                Text {
+                    text: root.clock-text != "" ? "время в пруду " + root.clock-text + " · клик по воде — покормить карпов" : "клик по воде — покормить карпов";
+                    color: #8d877c;
+                    font-size: 11px;
+                }
+
+                Section { text: "ЗВУК"; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { width: 52px; text: "Музыка"; color: #a59f93; font-size: 12px; vertical-alignment: center; }
+                    Slider { minimum: 0; maximum: 1; value <=> root.music-volume; changed => { root.volume-changed(); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { width: 52px; text: "Звуки"; color: #a59f93; font-size: 12px; vertical-alignment: center; }
+                    Slider { minimum: 0; maximum: 1; value <=> root.sfx-volume; changed => { root.volume-changed(); } }
+                }
+                Button { text: "Графика…"; clicked => { root.graphics-open = true; } }
+                Text { text: root.fps-text; color: #6c675e; font-size: 10px; }
+                Text { text: "F поворот · U назад · N новая · M ночь · R дождь · Tab панель"; color: #5d5850; font-size: 10px; wrap: word-wrap; }
+            }
+        }
+    }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "chess-rt"
+version = "0.1.0"
+edition = "2021"
+description = "Chess on a wooden raft in a koi pond: 2D chess rendered by a ray-traced fragment shader under a Slint UI"
+license = "WTFPL"
+
+[dependencies]
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2"] }
+glow = "0.18"
+png = "0.18"
+fastrand = "2.4"
+serde_json = "1"
+libpulse-binding = "2.29"
+libpulse-simple-binding = "2.29"
+
+[build-dependencies]
+slint-build = "1.18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 8
+
+[profile.dev]
+opt-level = 2
